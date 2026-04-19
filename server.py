@@ -1,5 +1,6 @@
 # 📁 server.py -----
 
+import argparse
 import json
 from os import environ as env
 from urllib.parse import quote_plus, urlencode
@@ -17,15 +18,7 @@ app.secret_key = env.get("APP_SECRET_KEY")
 
 oauth = OAuth(app)
 
-oauth.register(
-    "auth0",
-    client_id=env.get("AUTH0_CLIENT_ID"),
-    client_secret=env.get("AUTH0_CLIENT_SECRET"),
-    client_kwargs={
-        "scope": "openid profile email i3BskAFlJWw34G5CnvR4w4ZX9pComLry",
-    },
-    server_metadata_url=f'https://{env.get("AUTH0_DOMAIN")}/.well-known/openid-configuration',
-)
+# OAuth registration will be done after parsing CLI arguments
 
 @app.route("/")
 def home():
@@ -54,7 +47,7 @@ def logout():
         + urlencode(
             {
                 "returnTo": url_for("home", _external=True),
-                "client_id": env.get("AUTH0_CLIENT_ID"),
+                "client_id": client_id,
             },
             quote_via=quote_plus,
         )
@@ -62,4 +55,28 @@ def logout():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=env.get("PORT", 3000))
+    parser = argparse.ArgumentParser(description="Run the Auth0 Flask server")
+    parser.add_argument("--client-id", required=True, help="Auth0 Client ID")
+    # Secret を引数に追加
+    parser.add_argument("--client-secret", required=True, help="Auth0 Client Secret")
+    parser.add_argument("--port", type=int, default=3000, help="Port to run the server on (default: 3000)")
+    args = parser.parse_args()
+    
+    client_id = args.client_id
+    client_secret = args.client_secret # 変数に格納
+    port = args.port
+    
+    # Register OAuth
+    oauth.register(
+        "auth0",
+        client_id=client_id,
+        client_secret=client_secret, # Secret を渡す
+        client_kwargs={
+            "scope": "openid profile email",
+            "code_challenge_method": "S256", # PKCE は引き続き有効
+        },
+        server_metadata_url=f'https://{env.get("AUTH0_DOMAIN")}/.well-known/openid-configuration',
+        # token_endpoint_auth_method="none" は削除（デフォルトの Post/Basic を使用）
+    )
+    
+    app.run(host="0.0.0.0", port=port)
