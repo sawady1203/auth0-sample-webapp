@@ -2,12 +2,64 @@
   <head>
     <meta charset="utf-8" />
     <title>Auth0 Example</title>
+    <style>
+      pre { background: #f4f4f4; padding: 10px; border: 1px solid #ddd; overflow: auto; }
+      .token-section { margin-top: 20px; border-top: 2px solid #333; }
+      h3 { color: #0055ff; }
+    </style>
   </head>
   <body>
     {% if session %}
         <h1>Welcome {{session.userinfo.name}}!</h1>
         <p><a href="/logout">Logout</a></p>
-        <div><pre>{{pretty}}</pre></div>
+
+        <div id="decoded-data"></div>
+
+        <div class="token-section">
+            <h3>Raw JSON Data</h3>
+            <pre>{{pretty}}</pre>
+        </div>
+
+        <script>
+            // サーバーから渡された session データを JavaScript で取得
+            const sessionData = {{ pretty | safe }};
+
+            // JWT をデコードする関数
+            function decodeJWT(token) {
+                try {
+                    const base64Url = token.split('.')[1];
+                    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                    const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+                        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                    }).join(''));
+                    return JSON.parse(jsonPayload);
+                } catch (e) {
+                    return { error: "Invalid Token" };
+                }
+            }
+
+            const container = document.getElementById('decoded-data');
+            
+            // ID Token と Access Token をデコードして表示
+            const tokens = [
+                { name: "ID Token Claims", data: sessionData.id_token },
+                { name: "Access Token Claims", data: sessionData.access_token }
+            ];
+
+            tokens.forEach(t => {
+                const section = document.createElement('div');
+                section.className = 'token-section';
+                const title = document.createElement('h3');
+                title.innerText = t.name;
+                const pre = document.createElement('pre');
+                pre.innerText = JSON.stringify(decodeJWT(t.data), null, 4);
+                
+                section.appendChild(title);
+                section.appendChild(pre);
+                container.appendChild(section);
+            });
+        </script>
+
     {% else %}
         <h1>Welcome Guest</h1>
         <p><a href="/login">Login</a></p>
