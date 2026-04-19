@@ -4,64 +4,84 @@
 const ManagementClient = require('auth0').ManagementClient;
 
 exports.onExecutePostLogin = async (event, api) => {
-  // Management API の初期化（Secrets に登録した値を使用）
   const management = new ManagementClient({
     domain: event.secrets.AUTH0_DOMAIN,
     clientId: event.secrets.AUTH0_CLIENT_ID,
     clientSecret: event.secrets.AUTH0_CLIENT_SECRET,
   });
 
-  // 1. 接続種別の判定
+  // --- 1. 共通情報の取得 ---
   const enterpriseStrategies = ["waad", "samlp", "oidc", "adfs"];
   const isEnterprise = enterpriseStrategies.includes(event.connection.strategy);
+  const currentClientId = event.client.client_id;
 
-  // --- A. Enterprise接続（isEnterprise: true）の場合のロジック ---
+  // アプリケーションの Metadata から要求される認証レベルを取得 (GUIで設定する値)
+  // 設定がない場合はデフォルトでレベル 2 (Email MFA) とします
+  const requiredLevel = parseInt(event.client.metadata?.required_auth_level || "2", 10);
+
+  // --- 2. Enterprise接続専用のチェック (事前登録フラグ) ---
   if (isEnterprise) {
     const rawFlag = event.user.app_metadata?.is_pre_provisioned;
     const isPreProvisioned = (rawFlag === "true" || rawFlag === true);
 
-    // 事前登録フラグがない場合はアクセス拒否 ＆ アカウント削除
     if (!isPreProvisioned) {
       try {
         await management.users.delete({ id: event.user.user_id });
-        console.log(`[Security] Deleted enterprise user ${event.user.user_id} due to missing SCIM flag.`);
+        console.log(`[Security] Deleted Enterprise user ${event.user.user_id}: No SCIM flag.`);
       } catch (err) {
-        console.error("[Security] Failed to delete user:", err.message);
+        console.error("[Security] Delete failed:", err.message);
       }
-      return api.access.deny("access_denied", "事前登録されていないエンタープライズユーザーです。管理者に連絡してください。");
+      return api.access.deny("access_denied", "事前登録されていないエンタープライズユーザーです。");
     }
 
-  } 
-  
-  // --- B. DB接続（isEnterprise: false）の場合のロジック ---
-  else {
-    // すでにこのセッションで MFA (email) を完了しているか確認
-    const mfaDone = event.authentication?.methods.some(method => method.name === 'mfa' && method.type === 'email');
-
-    if (!mfaDone) {
-      // まだMFAしていない場合のみ、MFAを有効化してチャレンジを要求
-      api.multifactor.enable('any');
-      api.authentication.challengeWith({ type: 'email' });
+    // フラグを Boolean に正規化（運用を楽にするため）
+    if (typeof rawFlag === "string") {
+      api.user.setAppMetadata("is_pre_provisioned", true);
     }
-    // すでに完了している場合は、何もしない（＝そのままアプリへ通す）
   }
 
-  // --- C. 共通：Roleチェック（Client ID と同名の Role が必要） ---
-  const currentClientId = event.client.client_id;
+  // --- 3. ステップアップ MFA ロジック (DBユーザー対象) ---
+  // Enterprise ユーザーも一貫した強度を求めるなら !isEnterprise の条件を外してもOKです
+  if (!isEnterprise) {
+    // 現在のセッションですでに完了している認証方法を確認
+    const methods = event.authentication?.methods || [];
+    const hasEmailMfa = methods.some(m => m.name === 'mfa' && m.type === 'email');
+    const hasStrongMfa = methods.some(m => m.name === 'mfa' && (m.type === 'webauthn' || m.type === 'otp'));
+
+    let currentLevel = 1; // デフォルト（パスワードのみ）
+    if (hasStrongMfa) {
+      currentLevel = 3;
+    } else if (hasEmailMfa) {
+      currentLevel = 2;
+    }
+
+    // 要求レベルに達していない場合のみ MFA を実行
+    if (currentLevel < requiredLevel) {
+      if (requiredLevel === 2) {
+        // レベル 2: Email OTP を強制
+        api.multifactor.enable('any');
+        api.authentication.challengeWith({ type: 'email' });
+      } else if (requiredLevel >= 3) {
+        // レベル 3: 強固な MFA (WebAuthn/アプリ等) を要求
+        // 特定のタイプを指定しないことで、登録済みの最強要素が呼ばれます
+        api.multifactor.enable('any');
+      }
+    }
+  }
+
+  // --- 4. 共通：Roleチェック (Client ID と同名の Role が必要) ---
   const userRoles = event.authorization?.roles || [];
   const hasRequiredRole = userRoles.includes(currentClientId);
 
   if (!hasRequiredRole) {
-    // Enterprise ユーザーかつ Role がない場合も、ゴミを残さないために削除を実行
+    // Enterprise ユーザーの場合は Role がなくてもゴミを残さないために削除
     if (isEnterprise) {
       try {
         await management.users.delete({ id: event.user.user_id });
-        console.log(`[Security] Deleted enterprise user ${event.user.user_id} due to missing Role.`);
       } catch (err) {
-        console.error("[Security] Failed to delete user with no role:", err.message);
+        console.error("[Security] Delete failed (No Role):", err.message);
       }
     }
-    
-    return api.access.deny("access_denied", "このアプリケーションへのアクセス権限（Role）がありません。");
+    return api.access.deny("access_denied", "このアプリケーションへのアクセス権限(Role)がありません。");
   }
 };
